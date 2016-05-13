@@ -37,13 +37,82 @@ end
 type Population
   initial_pop_size::Int
   gen_num::Int
+  paretoFront::Array{EntityData, 1}
 
   ga_model::GAmodel
+end
+
+function calcPareto(P::Population, newEntities)
+  for ent in newEntities
+    # assess entity for fitness
+    if ent.fitness == -1
+      ent.fitness = P.ga_model.fitness
+
+    if !isnan(ent.fitness) && ent.fitness < Inf
+      if length(P.paretoFront) == 0
+        push!(P.paretoFront, ent)
+      else
+        dominated = false
+        index = 1
+        while index <= length(P.paretoFront)
+          paretoEntity = P.paretoFront[index]
+          if ent.dominates(paretoEntity)
+            # remove pareto front
+            splice!(P.paretoFront, index)
+          elseif paretoEntity.dominates(ent)
+            dominated = true
+            break
+          else
+            index += 1
+          end
+          if !dominated
+            push!(P.paretoFront, ent)
+          end
+        end
+      end
+    end
+  end
+end
+
+function simplifiedParetoFront(P::Population)
+# sort the paretoFront according to the one of the fitness function
+# here we use the number of non-zero features as the second dimention
+  if length(P.paretoFront) == 0
+    return []
+  end
+  nodeCounts = [t.numNodes for t in P.paretoFront]
+  m = minimum(nodeCounts)
+  M = minimum(nodeCounts)
+  lastFit = Inf
+  simpleParetoFront = []
+  for i = m:M
+    temp = []
+    for t in P.paretoFront
+      if t.numNodes == i
+        push!(temp, t)
+      end
+    end
+    if length(temp) > 0
+      minFitEntity = temp[1]
+      for t in temp[2:end]
+        if t.fitness < minFitEntity.fitness
+          minFitEntity = t
+        end
+      end
+      # only one entity per length, following the defination of paretofront
+      if minFitEntity.fitness <= lastFit
+        push!(simpleParetoFront, minFitEntity)
+        lastFit = minFitEntity.fitness
+      end
+    end
+  end
+  return simpleParetoFront
 end
 
 function iterate(P::Population)
   # iterate over generation
   # create light weight thread to compute fitness
+  evaluate_population(P)
   grouper = @task P.ga_model.ga.group_entities(model.population)
   groupings = Any[]
   while !istaskdone(grouper)
@@ -192,8 +261,10 @@ function runga(mdl::Module; initial_pop_size = 128)
             break
           end
         end
+        # update success state
         put!(Rs[myid()], success)
       end
+      # if success is in local island
       for r in Rs
         if take!(r)
           goodEnough = true
@@ -236,30 +307,30 @@ function runga(mdl::Module; initial_pop_size = 128)
   return getGlobalParetoFront(model)
 end
 
-function runga(model::GAmodel)
-    reset_model(model)
-    create_initial_population(model)
-
-    while true
-        evaluate_population(model)
-
-        grouper = @task model.ga.group_entities(model.population)
-        groupings = Any[]
-        while !istaskdone(grouper)
-            group = consume(grouper)
-            group != nothing && push!(groupings, group)
-        end
-
-        if length(groupings) < 1
-            break
-        end
-
-        crossover_population(model, groupings)
-        mutate_population(model)
-    end
-
-    model
-end
+# function runga(model::GAmodel)
+#     reset_model(model)
+#     create_initial_population(model)
+#
+#     while true
+#         evaluate_population(model)
+#
+#         grouper = @task model.ga.group_entities(model.population)
+#         groupings = Any[]
+#         while !istaskdone(grouper)
+#             group = consume(grouper)
+#             group != nothing && push!(groupings, group)
+#         end
+#
+#         if length(groupings) < 1
+#             break
+#         end
+#
+#         crossover_population(model, groupings)
+#         mutate_population(model)
+#     end
+#
+#     model
+# end
 
 # -------
 
