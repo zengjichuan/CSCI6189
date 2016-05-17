@@ -8,43 +8,112 @@ importall Base
 export  Entity,
         GAmodel,
 
-        runga,
-        freeze,
-        defrost,
-        generation_num,
-        population
+        runga
 
 # -------
 
 abstract Entity
 
-isless(lhs::Entity, rhs::Entity) = lhs.fitness < rhs.fitness
-
-fitness!(ent::Entity, fitness_score) = ent.fitness = fitness_score
-
-# -------
-
-type EntityData
-    entity
-    generation::Int
-
-    EntityData(entity, generation::Int) = new(entity, generation)
-    EntityData(entity, model) = new(entity, model.gen_num)
-end
 
 # -------
 
 type Population
-  initial_pop_size::Int
+  pop_data::Array{Entity, 1}
+  pop_size::Int
   gen_num::Int
+  paretoFront::Array{Entity, 1}
 
-  ga_model::GAmodel
+
+  ga_model
+
+  function Population(pop_size::Int, ga_model)
+    this = new()
+    this.ga_model = ga_model
+    this.pop_size = pop_size
+    this.gen_num = 0
+    # initialize population
+    this.pop_data = Entity[]
+    for i = 1:this.pop_size
+      push!(this.pop_data, Entity(model.ga.create_entity(i)))
+    end
+
+    calcPareto(this, P.pop_data)
+    return this
+  end
+end
+
+function calcPareto(P::Population, newEntities)
+  fit = pmap(P.ga_model.fitness, newEntities)   # need to require
+  for (ind, ent) in enumerate(newEntities)
+    # assess entity for fitness
+    ent.fitness = fit[ind]
+
+    if !isnan(ent.fitness) && ent.fitness < Inf
+      if length(P.paretoFront) == 0
+        push!(P.paretoFront, ent)
+      else
+        dominated = false
+        index = 1
+        while index <= length(P.paretoFront)
+          paretoEntity = P.paretoFront[index]
+          if ent.dominates(paretoEntity)
+            # remove pareto front
+            splice!(P.paretoFront, index)
+          elseif paretoEntity.dominates(ent)
+            dominated = true
+            break
+          else
+            index += 1
+          end
+          if !dominated
+            push!(P.paretoFront, ent)
+          end
+        end
+      end
+    end
+  end
+end
+
+function simplifiedParetoFront(P::Population)
+# sort the paretoFront according to the one of the fitness function
+# here we use the number of non-zero features as the second dimention
+  if length(P.paretoFront) == 0
+    return []
+  end
+  nodeCounts = [t.numNodes for t in P.paretoFront]
+  m = minimum(nodeCounts)
+  M = minimum(nodeCounts)
+  lastFit = Inf
+  simpleParetoFront = []
+  for i = m:M
+    temp = []
+    for t in P.paretoFront
+      if t.numNodes == i
+        push!(temp, t)
+      end
+    end
+    if length(temp) > 0
+      minFitEntity = temp[1]
+      for t in temp[2:end]
+        if t.fitness < minFitEntity.fitness
+          minFitEntity = t
+        end
+      end
+      # only one entity per length, following the defination of paretofront
+      if minFitEntity.fitness <= lastFit
+        push!(simpleParetoFront, minFitEntity)
+        lastFit = minFitEntity.fitness
+      end
+    end
+  end
+  return simpleParetoFront
 end
 
 function iterate(P::Population)
   # iterate over generation
-  # create light weight thread to compute fitness
-  grouper = @task P.ga_model.ga.group_entities(model.population)
+
+  # select parents
+  grouper = @task P.ga_model.ga.group_entities(P)
   groupings = Any[]
   while !istaskdone(grouper)
       group = consume(grouper)
@@ -52,33 +121,64 @@ function iterate(P::Population)
   end
 
   if length(groupings) < 1
-      break
+      println("no pretofront!")
   end
 
-  crossover_population(P.ga_model, groupings)
-  mutate_population(P.ga_model)
+  P.pop_data = EntityData[]
+  paretoFrontSize = length(P.paretoFront)
+  # keep all the pareto front
+  append!(P.pop_data, P.paretoFront)
+  # # just keep 2 elite children
+  # append!(model.population, model.population.paretoFront[[rand(1:paretoFrontSize), rand(1:paretoFrontSize)]])
+  newGen = EntityData[]
+
+  for r in rand(1, model.popSize - paretoFrontSize)
+    # do crossover
+    push!(newGen, EntityData(model.ga.crossover(groupings)))
+    # do mutation
+    if r < P.ga_model.mutationRate
+      model.ga.mutate(newGen[end])
+    end
+  end
+  append!(P.pop_data, newGen)
+  calcPareto(P, newGen)
+
 end
 
 
 type GAmodel
 
-
     islandCount::Int
     islands::Array{Any,1}
+    popSize::Int
     maxGenerations::Int
     numMigrate::Int
     migrationRate::Float64
+
     tolerance::Float64
 
-    population::Array
-    pop_data::Array{EntityData}
-    freezer::Array{EntityData}
-
-    rng::AbstractRNG
+    # population::Array
+    # pop_data::Array{EntityData}
+    # freezer::Array{EntityData}
+    #
+    # rng::AbstractRNG
 
     ga
 
-    GAmodel() = new(0, 1, 1, Any[], 0, 0.0, Any[], EntityData[], EntityData[], MersenneTwister(time_ns()), nothing)
+    function GAmodel(islandCount=1, popSize=100, maxGenerations=100, numMigrate=0.1, migrationRate=2, tol=.1)
+      this = new()
+      this.islandCount = islandCount
+      this.popSize = popSize
+      this.maxGenerations = maxGenerations
+      this.islands = Any[]
+
+      this.numMigrate = numMigrate
+      this.migrationRate = migrationRate
+
+      this.tolerance = tol
+      return this
+    end
+
 end
 
 global _g_model
@@ -135,15 +235,14 @@ generation_num(model::GAmodel = _g_model) = model.gen_num
 population(model::GAmodel = _g_model) = model.population
 
 
-function runga(mdl::Module; initial_pop_size = 128)
-  if mdl.islandCount > 1    # need to define islandCount in test Module
+function runga(mdl::Module; islandCount=1, popSize=100, maxGenerations=100, numMigrate=0.1, migrationRate=2, tol=.1)
+  if islandCount > 1    # need to define islandCount in test Module
     n = nprocs()
-    islandCount = min(n-1, mdl.islandCount)
+    islandCount = min(n-1, islandCount)
   end
 
-  model = GAmodel()
+  model = GAmodel(islandCount, popSize, maxGenerations, numMigrate, migrationRate, tol)
   model.ga = mdl
-  model.initial_pop_size = initial_pop_size
 
   numGen = 0
 
@@ -192,8 +291,10 @@ function runga(mdl::Module; initial_pop_size = 128)
             break
           end
         end
+        # update success state
         put!(Rs[myid()], success)
       end
+      # if success is in local island
       for r in Rs
         if take!(r)
           goodEnough = true
@@ -236,30 +337,30 @@ function runga(mdl::Module; initial_pop_size = 128)
   return getGlobalParetoFront(model)
 end
 
-function runga(model::GAmodel)
-    reset_model(model)
-    create_initial_population(model)
-
-    while true
-        evaluate_population(model)
-
-        grouper = @task model.ga.group_entities(model.population)
-        groupings = Any[]
-        while !istaskdone(grouper)
-            group = consume(grouper)
-            group != nothing && push!(groupings, group)
-        end
-
-        if length(groupings) < 1
-            break
-        end
-
-        crossover_population(model, groupings)
-        mutate_population(model)
-    end
-
-    model
-end
+# function runga(model::GAmodel)
+#     reset_model(model)
+#     create_initial_population(model)
+#
+#     while true
+#         evaluate_population(model)
+#
+#         grouper = @task model.ga.group_entities(model.population)
+#         groupings = Any[]
+#         while !istaskdone(grouper)
+#             group = consume(grouper)
+#             group != nothing && push!(groupings, group)
+#         end
+#
+#         if length(groupings) < 1
+#             break
+#         end
+#
+#         crossover_population(model, groupings)
+#         mutate_population(model)
+#     end
+#
+#     model
+# end
 
 # -------
 
@@ -273,7 +374,7 @@ function reset_model(model::GAmodel)
 end
 
 function create_initial_population(model::GAmodel)
-    for i = 1:model.initial_pop_size
+    for i = 1:model.popSize
         entity = model.ga.create_entity(i)
 
         push!(model.population, entity)
@@ -291,23 +392,35 @@ function evaluate_population(model::GAmodel)
 end
 
 function crossover_population(model::GAmodel, groupings)
-    old_pop = model.population
 
     model.population = Any[]
-    sizehint(model.population, length(old_pop))
+    paretoFrontSize = length(model.population.paretoFront)
+    # keep all the pareto front
+    append!(model.population, model.population.paretoFront)
+    # # just keep 2 elite children
+    # append!(model.population, model.population.paretoFront[[rand(1:paretoFrontSize), rand(1:paretoFrontSize)]])
 
-    model.pop_data = EntityData[]
-    sizehint(model.pop_data, length(old_pop))
-
-    model.gen_num += 1
-
-    for group in groupings
-        parents = { old_pop[i] for i in group }
-        entity = model.ga.crossover(parents)
-
-        push!(model.population, entity)
-        push!(model.pop_data, EntityData(model.ga.crossover(parents), model.gen_num))
+    for r = 1:(model.popSize - paretoFrontSize)
+      push!(model.population, model.ga.crossover(groupings))
     end
+
+    # old_pop = model.population
+    #
+    # model.population = Any[]
+    # sizehint(model.population, length(old_pop))
+    #
+    # model.pop_data = EntityData[]
+    # sizehint(model.pop_data, length(old_pop))
+    #
+    # model.gen_num += 1
+    #
+    # for group in groupings
+    #     parents = { old_pop[i] for i in group }
+    #     entity = model.ga.crossover(parents)
+    #
+    #     push!(model.population, entity)
+    #     push!(model.pop_data, EntityData(model.ga.crossover(parents), model.gen_num))
+    # end
 end
 
 function mutate_population(model::GAmodel)
@@ -318,7 +431,7 @@ end
 
 function getGlobalParetoFront(model::GAmodel)
   if model.islandCount == 1
-    globalParetoFront = model.islands[1].simplifiedParetoFront
+    globalParetoFront = simplifiedParetoFront(model.islands[1])
   else
     globalParetoFront = EntityData[]
     cans = EntityData[]
