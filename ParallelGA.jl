@@ -46,14 +46,15 @@ end
 
 function calcPareto(P::Population, newEntities)
   fit = pmap(P.ga_model.ga.fitness, newEntities)   # need to require
-  for ent in newEntities
-    println(ent.abcde)
-  end
-
+  # for ent in newEntities
+  #   println(ent.bitdata)
+  # end
+  # println(fit)
   for (ind, ent) in enumerate(newEntities)
     # assess entity for fitness
     ent.fitness = fit[ind]
-
+    # ent.fitness = P.ga_model.ga.fitness(ent)
+    println(ent.fitness)
     if !isnan(ent.fitness) && ent.fitness < Inf
       if length(P.paretoFront) == 0
         push!(P.paretoFront, ent)
@@ -82,6 +83,7 @@ function calcPareto(P::Population, newEntities)
       end
     end
   end
+  println("Parto size: $(length(P.paretoFront))")
 end
 
 function simplifiedParetoFront(P::Population)
@@ -135,24 +137,25 @@ function iterate(P::Population)
       println("no pretofront!")
   end
 
-  P.pop_data = Entity[]
-  paretoFrontSize = length(P.paretoFront)
-  # keep all the pareto front
-  append!(P.pop_data, P.paretoFront)
-  # # just keep 2 elite children
-  # append!(model.population, model.population.paretoFront[[rand(1:paretoFrontSize), rand(1:paretoFrontSize)]])
-  newGen = Entity[]
-
-  for r in rand(1, P.ga_model.popSize - paretoFrontSize)
-    # do crossover
-    push!(newGen, P.ga_model.ga.crossover(groupings))
-    # do mutation
-    if r < P.ga_model.mutationRate
-      P.ga_model.ga.mutate(newGen[end])
-    end
-  end
-  append!(P.pop_data, newGen)
-  calcPareto(P, newGen)
+  # P.pop_data = Entity[]
+  # paretoFrontSize = length(P.paretoFront)
+  # # keep all the pareto front
+  # append!(P.pop_data, P.paretoFront)
+  # # # just keep 2 elite children
+  # # append!(model.population, model.population.paretoFront[[rand(1:paretoFrontSize), rand(1:paretoFrontSize)]])
+  # newGen = Entity[]
+  #
+  # for r in rand(1, P.ga_model.popSize - paretoFrontSize)
+  #   # do crossover
+  #   push!(newGen, P.ga_model.ga.crossover(groupings))
+  #   # do mutation
+  #   if r < P.ga_model.mutationRate
+  #     P.ga_model.ga.mutate(newGen[end])
+  #   end
+  # end
+  # append!(P.pop_data, newGen)
+  # calcPareto(P, newGen)
+  calcPareto(P, P.pop_data)
   P.gen_num += 1
 end
 
@@ -160,7 +163,7 @@ end
 type GAmodel
 
     islandCount::Int
-    islands::Array{Entity,1}
+    islands::Array{Population,1}
     popSize::Int
     maxGenerations::Int
     numMigrate::Int
@@ -254,16 +257,20 @@ function runga(mdl::Module, islandCount=1, popSize=100, maxGenerations=100, numM
     end
     take!(r)
 
+    # global P = Population(model.popSize, model)
     @everywhere begin
+      #   eval(ParallelGA,Expr(:(=),:P, Population(model.popSize, model)))
       P = Population(model.popSize, model)
+      # eval(Main,Expr(:(=),:P, Population(model.popSize, model)))
     end
+
     println("Populations initialized")
 
     goodEnough = false
     r = RemoteRef()
     num = round(Int, model.maxGenerations * model.migrationRate)
     numToIterate = model.maxGenerations / num
-
+    println("number to iterate: $(numToIterate)")
     put!(r, numToIterate)
     @sync for p in procs()
         @spawnat p eval(Main,Expr(:(=),:numToIterate,fetch(r)))
@@ -336,8 +343,11 @@ function getGlobalParetoFront(model::GAmodel)
     cans = Entity[]
     PF = Entity[]
 
-    @sync for p in procs()
-      @spawnat p put!(Rs[myid()],P.paretoFront)
+    # @sync for p in procs()
+    #   @spawnat p put!(Rs[myid()],P.paretoFront)
+    # end
+    @everywhere begin
+      put!(Rs[myid()], P.paretoFront)
     end
     for r in Rs
       append!(cans,take!(r));
@@ -353,7 +363,7 @@ function getGlobalParetoFront(model::GAmodel)
         index = 1
         while index <= length(PF)
           paretoEntity = PF[index]
-          if can.domiantes(paretoEntity)
+          if can.dominates(paretoEntity)
             # remove pareto entity
             splice!(PF, index)
           elseif paretoEntity.dominates(can)
